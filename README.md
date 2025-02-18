@@ -24,6 +24,30 @@ HMSDK consists of multiple git submodules so please download it as follows.
 - 2023-12-27: HMSDK v2.0 released - support [DAMON](https://sjp38.github.io/post/damon) based 2-tier memory management
 - 2023-05-09: HMSDK v1.1 released - support bandwidth aware interleaving, user library and tools
 
+## For PEBS enabled
+```shell
+cd linux
+cp /boot/config-$(uname -r) .config
+echo 'CONFIG_DAMON=y' >> .config
+echo 'CONFIG_DAMON_VADDR=y' >> .config
+echo 'CONFIG_DAMON_PADDR=y' >> .config
+echo 'CONFIG_DAMON_SYSFS=y' >> .config
+echo 'CONFIG_MEMCG=y' >> .config
+echo 'CONFIG_MEMORY_HOTPLUG=y' >> .config
+make menuconfig
+```
+in menuconfig, search PEBS_TEST to set CONFIG_PEBS_TEST=y
+```shell
+make -j$(nproc)
+sudo make INSTALL_MOD_STRIP=1 modules_install
+sudo make headers_install
+sudo make install
+```
+set booting kernel to 
+```shell
+sudo grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-pebs_git"
+```
+
 ## License
 
 The HMSDK is released under BSD 2-Clause license.

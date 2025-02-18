@@ -1,0 +1,1248 @@
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   ../.gitignore
+	modified:   ../.gitmodules
+	modified:   ../README.md
+	modified:   Makefile
+	modified:   arch/x86/entry/syscalls/syscall_64.tbl
+	new file:   include/linux/pebs_test.h
+	modified:   include/linux/perf_event.h
+	modified:   include/linux/syscalls.h
+	modified:   kernel/events/core.c
+	new file:   make.log
+	modified:   mm/Kconfig
+	modified:   mm/Makefile
+	new file:   mm/pebs_test.c
+	new file:   ../pebs_userspace/Makefile
+	new file:   ../pebs_userspace/pebs_userspace.c
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   kernel/events/core.c
+	modified:   mm/pebs_test.c
+	modified:   ../pebs_userspace/pebs_userspace.c
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	git_status.log
+	../pebs_userspace/pebs_userspace
+
+diff --git a/.gitignore b/.gitignore
+index b5a0eae56..4d0745b37 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,3 +2,7 @@
+ *.diff
+ *.orig
+ __pycache__
++*.o
++*.ko
++/arch/x86/boot/
++make.log
+diff --git a/.gitmodules b/.gitmodules
+index 332132ee6..29f0ec21d 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,6 +1,3 @@
+-[submodule "linux"]
+-	path = linux
+-	url = https://github.com/skhynix/linux.git
+ [submodule "numactl"]
+ 	path = numactl
+ 	url = https://github.com/skhynix/numactl.git
+diff --git a/README.md b/README.md
+index 04fecdc9a..c0a86d187 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,30 @@ HMSDK consists of multiple git submodules so please download it as follows.
+ - 2023-12-27: HMSDK v2.0 released - support [DAMON](https://sjp38.github.io/post/damon) based 2-tier memory management
+ - 2023-05-09: HMSDK v1.1 released - support bandwidth aware interleaving, user library and tools
+ 
++## For PEBS enabled
++```shell
++cd linux
++cp /boot/config-$(uname -r) .config
++echo 'CONFIG_DAMON=y' >> .config
++echo 'CONFIG_DAMON_VADDR=y' >> .config
++echo 'CONFIG_DAMON_PADDR=y' >> .config
++echo 'CONFIG_DAMON_SYSFS=y' >> .config
++echo 'CONFIG_MEMCG=y' >> .config
++echo 'CONFIG_MEMORY_HOTPLUG=y' >> .config
++make menuconfig
++```
++in menuconfig, search PEBS_TEST to set CONFIG_PEBS_TEST=y
++```shell
++make -j$(nproc)
++sudo make INSTALL_MOD_STRIP=1 modules_install
++sudo make headers_install
++sudo make install
++```
++set booting kernel to 
++```shell
++sudo grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-pebs_git"
++```
++
+ ## License
+ 
+ The HMSDK is released under BSD 2-Clause license.
+diff --git a/linux/Makefile b/linux/Makefile
+index 68a8faff2..f4d6a64ae 100644
+--- a/linux/Makefile
++++ b/linux/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 6
+ PATCHLEVEL = 12
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = -pebs_git
+ NAME = Baby Opossum Posse
+ 
+ # *DOCUMENTATION*
+diff --git a/linux/arch/x86/entry/syscalls/syscall_64.tbl b/linux/arch/x86/entry/syscalls/syscall_64.tbl
+index 7093ee21c..ce0564b94 100644
+--- a/linux/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/linux/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -386,6 +386,8 @@
+ 460	common	lsm_set_self_attr	sys_lsm_set_self_attr
+ 461	common	lsm_list_modules	sys_lsm_list_modules
+ 462 	common  mseal			sys_mseal
++463 common  pebs_start          sys_pebs_start
++464 common  pebs_end            sys_pebs_end
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/linux/include/linux/pebs_test.h b/linux/include/linux/pebs_test.h
+new file mode 100644
+index 000000000..16c7c7812
+--- /dev/null
++++ b/linux/include/linux/pebs_test.h
+@@ -0,0 +1,2 @@
++extern int pebs_test_init(void);
++extern void pebs_test_exit(void);
+\ No newline at end of file
+diff --git a/linux/include/linux/perf_event.h b/linux/include/linux/perf_event.h
+index fb908843f..4a17db982 100644
+--- a/linux/include/linux/perf_event.h
++++ b/linux/include/linux/perf_event.h
+@@ -1944,4 +1944,10 @@ static inline void perf_lopwr_cb(bool mode)
+ }
+ #endif
+ 
++#ifdef CONFIG_PEBS_TEST
++extern int test__perf_event_init(struct perf_event *event, unsigned long nr_pages);
++extern int test__perf_event_open(struct perf_event_attr *attr_uptr, pid_t pid,
++		int cpu, int group_fd, unsigned long flags);
++#endif
++
+ #endif /* _LINUX_PERF_EVENT_H */
+diff --git a/linux/include/linux/syscalls.h b/linux/include/linux/syscalls.h
+index 575810492..d927e254a 100644
+--- a/linux/include/linux/syscalls.h
++++ b/linux/include/linux/syscalls.h
+@@ -846,6 +846,12 @@ asmlinkage long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t  pid, int sig,
+ asmlinkage long sys_perf_event_open(
+ 		struct perf_event_attr __user *attr_uptr,
+ 		pid_t pid, int cpu, int group_fd, unsigned long flags);
++
++/* CONFIG PEBS_TEST*/
++asmlinkage long sys_pebs_start(pid_t pid);
++asmlinkage long sys_pebs_end(pid_t pid);
++/*******************/
++
+ asmlinkage long sys_accept4(int, struct sockaddr __user *, int __user *, int);
+ asmlinkage long sys_recvmmsg(int fd, struct mmsghdr __user *msg,
+ 			     unsigned int vlen, unsigned flags,
+diff --git a/linux/kernel/events/core.c b/linux/kernel/events/core.c
+index df27d08a7..facef0555 100644
+--- a/linux/kernel/events/core.c
++++ b/linux/kernel/events/core.c
+@@ -60,6 +60,8 @@
+ 
+ #include <asm/irq_regs.h>
+ 
++#include <linux/pebs_test.h>
++
+ typedef int (*remote_function_f)(void *);
+ 
+ struct remote_function_call {
+@@ -12645,6 +12647,459 @@ perf_check_permission(struct perf_event_attr *attr, struct task_struct *task)
+ 	return is_capable || ptrace_may_access(task, ptrace_mode);
+ }
+ 
++
++#ifdef CONFIG_PEBS_TEST
++
++SYSCALL_DEFINE1(pebs_start,
++		pid_t, pid)
++{
++    pebs_test_init();
++    return 0;
++}
++
++SYSCALL_DEFINE1(pebs_end,
++		pid_t, pid)
++{
++    pebs_test_exit();
++    return 0;
++}
++
++/* allocates perf_buffer instead of calling perf_mmap() */
++int test__perf_event_init(struct perf_event *event, unsigned long nr_pages)
++{
++    struct perf_buffer *rb = NULL;
++    int ret = 0, flags = 0;
++
++    if (event->cpu == -1 && event->attr.inherit)
++	return -EINVAL;
++
++    ret = security_perf_event_read(event);
++    if (ret)
++	return ret;
++
++    if (nr_pages != 0 && !is_power_of_2(nr_pages))
++	return -EINVAL;
++
++    WARN_ON_ONCE(event->ctx->parent_ctx);
++    mutex_lock(&event->mmap_mutex);
++
++    WARN_ON(event->rb);
++
++    rb = rb_alloc(nr_pages,
++	    event->attr.watermark ? event->attr.wakeup_watermark : 0,
++	    event->cpu, flags);
++    if (!rb) {
++	ret = -ENOMEM;
++	goto unlock;
++    }
++
++    ring_buffer_attach(event, rb);
++    perf_event_init_userpage(event);
++    perf_event_update_userpage(event);
++
++unlock:
++    if (!ret) {
++	atomic_inc(&event->mmap_count);
++    }
++    mutex_unlock(&event->mmap_mutex);
++    return ret;
++}EXPORT_SYMBOL_GPL(test__perf_event_init);
++
++int test__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
++	int cpu, int group_fd, unsigned long flags)
++{
++	struct perf_event *group_leader = NULL, *output_event = NULL;
++	struct perf_event_pmu_context *pmu_ctx;
++	struct perf_event *event, *sibling;
++	struct perf_event_attr attr;
++	struct perf_event_context *ctx;
++	struct file *event_file = NULL;
++	struct fd group = EMPTY_FD;
++	struct task_struct *task = NULL;
++	struct pmu *pmu;
++	int event_fd;
++	int move_group = 0;
++	int err;
++	int f_flags = O_RDWR;
++	int cgroup_fd = -1;
++
++	/* for future expandability... */
++	if (flags & ~PERF_FLAG_ALL)
++		return -EINVAL;
++
++	/* err = perf_copy_attr(attr_uptr, &attr);
++	if (err)
++		return err; */
++	attr = *attr_ptr;
++
++	/* Do we allow access to perf_event_open(2) ? */
++	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);
++	if (err)
++		return err;
++
++	if (!attr.exclude_kernel) {
++		err = perf_allow_kernel(&attr);
++		if (err)
++			return err;
++	}
++
++	if (attr.namespaces) {
++		if (!perfmon_capable())
++			return -EACCES;
++	}
++
++	if (attr.freq) {
++		if (attr.sample_freq > sysctl_perf_event_sample_rate)
++			return -EINVAL;
++	} else {
++		if (attr.sample_period & (1ULL << 63))
++			return -EINVAL;
++	}
++
++	/* Only privileged users can get physical addresses */
++	if ((attr.sample_type & PERF_SAMPLE_PHYS_ADDR)) {
++		err = perf_allow_kernel(&attr);
++		if (err)
++			return err;
++	}
++
++	/* REGS_INTR can leak data, lockdown must prevent this */
++	if (attr.sample_type & PERF_SAMPLE_REGS_INTR) {
++		err = security_locked_down(LOCKDOWN_PERF);
++		if (err)
++			return err;
++	}
++
++	/*
++	 * In cgroup mode, the pid argument is used to pass the fd
++	 * opened to the cgroup directory in cgroupfs. The cpu argument
++	 * designates the cpu on which to monitor threads from that
++	 * cgroup.
++	 */
++	if ((flags & PERF_FLAG_PID_CGROUP) && (pid == -1 || cpu == -1))
++		return -EINVAL;
++
++	if (flags & PERF_FLAG_FD_CLOEXEC)
++		f_flags |= O_CLOEXEC;
++
++	event_fd = get_unused_fd_flags(f_flags);
++	if (event_fd < 0)
++		return event_fd;
++
++	if (group_fd != -1) {
++		err = perf_fget_light(group_fd, &group);
++		if (err)
++			goto err_fd;
++		group_leader = fd_file(group)->private_data;
++		if (flags & PERF_FLAG_FD_OUTPUT)
++			output_event = group_leader;
++		if (flags & PERF_FLAG_FD_NO_GROUP)
++			group_leader = NULL;
++	}
++
++	if (pid != -1 && !(flags & PERF_FLAG_PID_CGROUP)) {
++		task = find_lively_task_by_vpid(pid);
++		if (IS_ERR(task)) {
++			err = PTR_ERR(task);
++			goto err_group_fd;
++		}
++	}
++
++	if (task && group_leader &&
++	    group_leader->attr.inherit != attr.inherit) {
++		err = -EINVAL;
++		goto err_task;
++	}
++
++	if (flags & PERF_FLAG_PID_CGROUP)
++		cgroup_fd = pid;
++
++	event = perf_event_alloc(&attr, cpu, task, group_leader, NULL,
++				 NULL, NULL, cgroup_fd);
++	if (IS_ERR(event)) {
++		err = PTR_ERR(event);
++		goto err_task;
++	}
++
++	if (is_sampling_event(event)) {
++		if (event->pmu->capabilities & PERF_PMU_CAP_NO_INTERRUPT) {
++			err = -EOPNOTSUPP;
++			goto err_alloc;
++		}
++	}
++
++	/*
++	 * Special case software events and allow them to be part of
++	 * any hardware group.
++	 */
++	pmu = event->pmu;
++
++	if (attr.use_clockid) {
++		err = perf_event_set_clock(event, attr.clockid);
++		if (err)
++			goto err_alloc;
++	}
++
++	if (pmu->task_ctx_nr == perf_sw_context)
++		event->event_caps |= PERF_EV_CAP_SOFTWARE;
++
++	if (task) {
++		err = down_read_interruptible(&task->signal->exec_update_lock);
++		if (err)
++			goto err_alloc;
++
++		/*
++		 * We must hold exec_update_lock across this and any potential
++		 * perf_install_in_context() call for this new event to
++		 * serialize against exec() altering our credentials (and the
++		 * perf_event_exit_task() that could imply).
++		 */
++		err = -EACCES;
++		if (!perf_check_permission(&attr, task))
++			goto err_cred;
++	}
++
++	/*
++	 * Get the target context (task or percpu):
++	 */
++	ctx = find_get_context(task, event);
++	if (IS_ERR(ctx)) {
++		err = PTR_ERR(ctx);
++		goto err_cred;
++	}
++
++	mutex_lock(&ctx->mutex);
++
++	if (ctx->task == TASK_TOMBSTONE) {
++		err = -ESRCH;
++		goto err_locked;
++	}
++
++	if (!task) {
++		/*
++		 * Check if the @cpu we're creating an event for is online.
++		 *
++		 * We use the perf_cpu_context::ctx::mutex to serialize against
++		 * the hotplug notifiers. See perf_event_{init,exit}_cpu().
++		 */
++		struct perf_cpu_context *cpuctx = per_cpu_ptr(&perf_cpu_context, event->cpu);
++
++		if (!cpuctx->online) {
++			err = -ENODEV;
++			goto err_locked;
++		}
++	}
++
++	if (group_leader) {
++		err = -EINVAL;
++
++		/*
++		 * Do not allow a recursive hierarchy (this new sibling
++		 * becoming part of another group-sibling):
++		 */
++		if (group_leader->group_leader != group_leader)
++			goto err_locked;
++
++		/* All events in a group should have the same clock */
++		if (group_leader->clock != event->clock)
++			goto err_locked;
++
++		/*
++		 * Make sure we're both events for the same CPU;
++		 * grouping events for different CPUs is broken; since
++		 * you can never concurrently schedule them anyhow.
++		 */
++		if (group_leader->cpu != event->cpu)
++			goto err_locked;
++
++		/*
++		 * Make sure we're both on the same context; either task or cpu.
++		 */
++		if (group_leader->ctx != ctx)
++			goto err_locked;
++
++		/*
++		 * Only a group leader can be exclusive or pinned
++		 */
++		if (attr.exclusive || attr.pinned)
++			goto err_locked;
++
++		if (is_software_event(event) &&
++		    !in_software_context(group_leader)) {
++			/*
++			 * If the event is a sw event, but the group_leader
++			 * is on hw context.
++			 *
++			 * Allow the addition of software events to hw
++			 * groups, this is safe because software events
++			 * never fail to schedule.
++			 *
++			 * Note the comment that goes with struct
++			 * perf_event_pmu_context.
++			 */
++			pmu = group_leader->pmu_ctx->pmu;
++		} else if (!is_software_event(event)) {
++			if (is_software_event(group_leader) &&
++			    (group_leader->group_caps & PERF_EV_CAP_SOFTWARE)) {
++				/*
++				 * In case the group is a pure software group, and we
++				 * try to add a hardware event, move the whole group to
++				 * the hardware context.
++				 */
++				move_group = 1;
++			}
++
++			/* Don't allow group of multiple hw events from different pmus */
++			if (!in_software_context(group_leader) &&
++			    group_leader->pmu_ctx->pmu != pmu)
++				goto err_locked;
++		}
++	}
++
++	/*
++	 * Now that we're certain of the pmu; find the pmu_ctx.
++	 */
++	pmu_ctx = find_get_pmu_context(pmu, ctx, event);
++	if (IS_ERR(pmu_ctx)) {
++		err = PTR_ERR(pmu_ctx);
++		goto err_locked;
++	}
++	event->pmu_ctx = pmu_ctx;
++
++	if (output_event) {
++		err = perf_event_set_output(event, output_event);
++		if (err)
++			goto err_context;
++	}
++
++	if (!perf_event_validate_size(event)) {
++		err = -E2BIG;
++		goto err_context;
++	}
++
++	if (perf_need_aux_event(event) && !perf_get_aux_event(event, group_leader)) {
++		err = -EINVAL;
++		goto err_context;
++	}
++
++	/*
++	 * Must be under the same ctx::mutex as perf_install_in_context(),
++	 * because we need to serialize with concurrent event creation.
++	 */
++	if (!exclusive_event_installable(event, ctx)) {
++		err = -EBUSY;
++		goto err_context;
++	}
++
++	WARN_ON_ONCE(ctx->parent_ctx);
++
++	event_file = anon_inode_getfile("[perf_event]", &perf_fops, event, f_flags);
++	if (IS_ERR(event_file)) {
++		err = PTR_ERR(event_file);
++		event_file = NULL;
++		goto err_context;
++	}
++
++	/*
++	 * This is the point on no return; we cannot fail hereafter. This is
++	 * where we start modifying current state.
++	 */
++
++	if (move_group) {
++		perf_remove_from_context(group_leader, 0);
++		put_pmu_ctx(group_leader->pmu_ctx);
++
++		for_each_sibling_event(sibling, group_leader) {
++			perf_remove_from_context(sibling, 0);
++			put_pmu_ctx(sibling->pmu_ctx);
++		}
++
++		/*
++		 * Install the group siblings before the group leader.
++		 *
++		 * Because a group leader will try and install the entire group
++		 * (through the sibling list, which is still in-tact), we can
++		 * end up with siblings installed in the wrong context.
++		 *
++		 * By installing siblings first we NO-OP because they're not
++		 * reachable through the group lists.
++		 */
++		for_each_sibling_event(sibling, group_leader) {
++			sibling->pmu_ctx = pmu_ctx;
++			get_pmu_ctx(pmu_ctx);
++			perf_event__state_init(sibling);
++			perf_install_in_context(ctx, sibling, sibling->cpu);
++		}
++
++		/*
++		 * Removing from the context ends up with disabled
++		 * event. What we want here is event in the initial
++		 * startup state, ready to be add into new context.
++		 */
++		group_leader->pmu_ctx = pmu_ctx;
++		get_pmu_ctx(pmu_ctx);
++		perf_event__state_init(group_leader);
++		perf_install_in_context(ctx, group_leader, group_leader->cpu);
++	}
++
++	/*
++	 * Precalculate sample_data sizes; do while holding ctx::mutex such
++	 * that we're serialized against further additions and before
++	 * perf_install_in_context() which is the point the event is active and
++	 * can use these values.
++	 */
++	perf_event__header_size(event);
++	perf_event__id_header_size(event);
++
++	event->owner = current;
++
++	perf_install_in_context(ctx, event, event->cpu);
++	perf_unpin_context(ctx);
++
++	mutex_unlock(&ctx->mutex);
++
++	if (task) {
++		up_read(&task->signal->exec_update_lock);
++		put_task_struct(task);
++	}
++
++	mutex_lock(&current->perf_event_mutex);
++	list_add_tail(&event->owner_entry, &current->perf_event_list);
++	mutex_unlock(&current->perf_event_mutex);
++
++	/*
++	 * Drop the reference on the group_event after placing the
++	 * new event on the sibling_list. This ensures destruction
++	 * of the group leader will find the pointer to itself in
++	 * perf_group_detach().
++	 */
++	fdput(group);
++	fd_install(event_fd, event_file);
++	return event_fd;
++
++err_context:
++	put_pmu_ctx(event->pmu_ctx);
++	event->pmu_ctx = NULL; /* _free_event() */
++err_locked:
++	mutex_unlock(&ctx->mutex);
++	perf_unpin_context(ctx);
++	put_ctx(ctx);
++err_cred:
++	if (task)
++		up_read(&task->signal->exec_update_lock);
++err_alloc:
++	free_event(event);
++err_task:
++	if (task)
++		put_task_struct(task);
++err_group_fd:
++	fdput(group);
++err_fd:
++	put_unused_fd(event_fd);
++	return err;
++}EXPORT_SYMBOL_GPL(test__perf_event_open);
++#endif
++
+ /**
+  * sys_perf_event_open - open a performance event, associate it to a task/cpu
+  *
+diff --git a/linux/make.log b/linux/make.log
+new file mode 100644
+index 000000000..1aeec7300
+--- /dev/null
++++ b/linux/make.log
+@@ -0,0 +1,96 @@
++mkdir -p /home/new_cloud_cxl/sungsu/hmsdk/linux/tools/objtool && make O=/home/new_cloud_cxl/sungsu/hmsdk/linux subdir=tools/objtool --no-print-directory -C objtool 
++  INSTALL libsubcmd_headers
++  CALL    scripts/checksyscalls.sh
++  CC      mm/pebs_test.o
++  CC      kernel/events/core.o
++  CHK     kernel/kheaders_data.tar.xz
++  GEN     kernel/kheaders_data.tar.xz
++  AR      mm/built-in.a
++  AR      kernel/events/built-in.a
++  AR      kernel/built-in.a
++  CC [M]  kernel/kheaders.o
++  AR      built-in.a
++  AR      vmlinux.a
++  LD      vmlinux.o
++  OBJCOPY modules.builtin.modinfo
++  GEN     modules.builtin
++  GEN     .vmlinux.objs
++  MODPOST Module.symvers
++  UPD     include/generated/utsversion.h
++  CC      init/version-timestamp.o
++  KSYMS   .tmp_vmlinux0.kallsyms.S
++  AS      .tmp_vmlinux0.kallsyms.o
++  LD      .tmp_vmlinux1
++  NM      .tmp_vmlinux1.syms
++  KSYMS   .tmp_vmlinux1.kallsyms.S
++  AS      .tmp_vmlinux1.kallsyms.o
++  LD      .tmp_vmlinux2
++  NM      .tmp_vmlinux2.syms
++  KSYMS   .tmp_vmlinux2.kallsyms.S
++  LD [M]  kernel/kheaders.ko
++  AS      .tmp_vmlinux2.kallsyms.o
++  LD      vmlinux
++  NM      System.map
++  SORTTAB vmlinux
++  RELOCS  arch/x86/boot/compressed/vmlinux.relocs
++  RSTRIP  vmlinux
++  CC      arch/x86/boot/a20.o
++  AS      arch/x86/boot/bioscall.o
++  CC      arch/x86/boot/cmdline.o
++  AS      arch/x86/boot/copy.o
++  HOSTCC  arch/x86/boot/mkcpustr
++  CC      arch/x86/boot/cpuflags.o
++  CC      arch/x86/boot/cpucheck.o
++  CC      arch/x86/boot/early_serial_console.o
++  CC      arch/x86/boot/edd.o
++  CC      arch/x86/boot/main.o
++  CC      arch/x86/boot/memory.o
++  CC      arch/x86/boot/pm.o
++  AS      arch/x86/boot/pmjump.o
++  CC      arch/x86/boot/printf.o
++  CC      arch/x86/boot/regs.o
++  CC      arch/x86/boot/string.o
++  CC      arch/x86/boot/tty.o
++  CC      arch/x86/boot/video.o
++  CC      arch/x86/boot/video-mode.o
++  CC      arch/x86/boot/version.o
++  CC      arch/x86/boot/video-vga.o
++  CC      arch/x86/boot/video-vesa.o
++  CC      arch/x86/boot/video-bios.o
++  HOSTCC  arch/x86/boot/tools/build
++  CPUSTR  arch/x86/boot/cpustr.h
++  CC      arch/x86/boot/cpu.o
++  LDS     arch/x86/boot/compressed/vmlinux.lds
++  AS      arch/x86/boot/compressed/kernel_info.o
++  AS      arch/x86/boot/compressed/head_64.o
++  VOFFSET arch/x86/boot/compressed/../voffset.h
++  CC      arch/x86/boot/compressed/string.o
++  CC      arch/x86/boot/compressed/cmdline.o
++  CC      arch/x86/boot/compressed/error.o
++  OBJCOPY arch/x86/boot/compressed/vmlinux.bin
++  HOSTCC  arch/x86/boot/compressed/mkpiggy
++  CC      arch/x86/boot/compressed/cpuflags.o
++  CC      arch/x86/boot/compressed/early_serial_console.o
++  CC      arch/x86/boot/compressed/kaslr.o
++  CC      arch/x86/boot/compressed/ident_map_64.o
++  CC      arch/x86/boot/compressed/idt_64.o
++  AS      arch/x86/boot/compressed/idt_handlers_64.o
++  AS      arch/x86/boot/compressed/mem_encrypt.o
++  CC      arch/x86/boot/compressed/pgtable_64.o
++  CC      arch/x86/boot/compressed/sev.o
++  CC      arch/x86/boot/compressed/acpi.o
++  CC      arch/x86/boot/compressed/mem.o
++  CC      arch/x86/boot/compressed/efi.o
++  AS      arch/x86/boot/compressed/efi_mixed.o
++  ZSTD22  arch/x86/boot/compressed/vmlinux.bin.zst
++  CC      arch/x86/boot/compressed/misc.o
++  MKPIGGY arch/x86/boot/compressed/piggy.S
++  AS      arch/x86/boot/compressed/piggy.o
++  LD      arch/x86/boot/compressed/vmlinux
++  ZOFFSET arch/x86/boot/zoffset.h
++  OBJCOPY arch/x86/boot/vmlinux.bin
++  AS      arch/x86/boot/header.o
++  LD      arch/x86/boot/setup.elf
++  OBJCOPY arch/x86/boot/setup.bin
++  BUILD   arch/x86/boot/bzImage
++Kernel: arch/x86/boot/bzImage is ready  (#2)
+diff --git a/linux/mm/Kconfig b/linux/mm/Kconfig
+index 33fa51d60..558254893 100644
+--- a/linux/mm/Kconfig
++++ b/linux/mm/Kconfig
+@@ -1295,6 +1295,12 @@ config NUMA_EMU
+ 	  into virtual nodes when booted with "numa=fake=N", where N is the
+ 	  number of nodes. This is only useful for debugging.
+ 
++config PEBS_TEST
++    bool "Enable PEBS Test Support"
++    default n
++    help
++      Enable support for PEBS test functionality.
++
+ source "mm/damon/Kconfig"
+ 
+ endmenu
+diff --git a/linux/mm/Makefile b/linux/mm/Makefile
+index d5639b036..e6cefb5ae 100644
+--- a/linux/mm/Makefile
++++ b/linux/mm/Makefile
+@@ -145,3 +145,4 @@ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+ obj-$(CONFIG_EXECMEM) += execmem.o
+ obj-$(CONFIG_TMPFS_QUOTA) += shmem_quota.o
++obj-$(CONFIG_PEBS_TEST) += pebs_test.o
+diff --git a/linux/mm/pebs_test.c b/linux/mm/pebs_test.c
+new file mode 100644
+index 000000000..abd43c913
+--- /dev/null
++++ b/linux/mm/pebs_test.c
+@@ -0,0 +1,406 @@
++// htmm_pebs_module.c
++#include <linux/module.h>
++#include <linux/kthread.h>
++#include <linux/perf_event.h>
++#include <linux/sched.h>
++#include <linux/cpumask.h>
++#include <linux/delay.h>
++#include <linux/sched/cputime.h>
++
++#include "../kernel/events/internal.h"
++
++#include <linux/perf_event.h>
++#include <linux/pebs_test.h>
++
++#define CPUS_PER_SOCKET 4
++#define BUFFER_SIZE	32 /* 128: 1MB */
++#define SAMPLE_PERIOD 1000
++
++/* pebs events */
++#define DRAM_LLC_LOAD_MISS  0x1d3
++#define REMOTE_DRAM_LLC_LOAD_MISS   0x2d3
++#define NVM_LLC_LOAD_MISS   0x80d1
++#define ALL_STORES	    0x82d0
++#define ALL_LOADS	    0x81d0
++#define STLB_MISS_STORES    0x12d0
++#define STLB_MISS_LOADS	    0x11d0
++#define LLC_LOAD_MISS 0x20d1
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Sungsu Ahn");
++MODULE_DESCRIPTION("PEBS Sampling Module");
++
++static struct task_struct *access_sampling;
++static struct perf_event ***mem_event;
++
++static bool valid_va(unsigned long addr)
++{
++    if (!(addr >> (PGDIR_SHIFT + 9)) && addr != 0)
++	return true;
++    else
++	return false;
++}
++
++struct test_event {
++    struct perf_event_header header;
++    __u64 ip;
++    __u32 pid, tid;
++    __u64 addr;
++    __u64 phys_addr;
++};
++
++enum events {
++    LLC_LOAD = 0,
++    N_HTMMEVENTS
++};
++
++static __u64 get_pebs_event(enum events e)
++{
++    switch (e) {
++    case LLC_LOAD:
++        return LLC_LOAD_MISS;
++	default:
++	    return N_HTMMEVENTS;
++    }
++}
++
++
++// static void perf_sample_callback(struct perf_event *event,
++//                                struct perf_sample_data *data,
++//                                struct pt_regs *regs)
++// {
++//     char *event_name;
++
++//     switch (event->attr.config) {
++//         case LLC_LOAD_MISS:
++//             event_name = "LLC_LOAD_MISS";
++//             break;
++//         default:
++//             event_name = "UNKNOWN";
++//     }
++
++//     pr_info("[PEBS] event: %s, ip=0x%lx, tgid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
++//             event_name, regs->ip,
++//             data->tid_entry.pid,
++//             data->tid_entry.tid,
++//             data->addr, data->phys_addr);
++// }
++
++// static struct perf_buffer *perf_buffer_alloc(int nr_pages)
++// {
++//     struct perf_buffer *rb;
++
++//     rb = kzalloc(sizeof(*rb), GFP_KERNEL);
++//     if (!rb)
++//         return NULL;
++
++//     rb->nr_pages = nr_pages;
++
++//     refcount_set(&rb->refcount, 1);
++//     INIT_LIST_HEAD(&rb->event_list);
++//     spin_lock_init(&rb->event_lock);
++
++//     // 사용자 페이지와 데이터 페이지 할당
++//     rb->user_page = (void *)__get_free_pages(GFP_KERNEL, 0);
++//     if (!rb->user_page)
++//         goto error;
++
++//     rb->data_pages = kcalloc(nr_pages, sizeof(void *), GFP_KERNEL);
++//     if (!rb->data_pages) 
++//         goto free_user_page;
++
++//     for (int i = 0; i < nr_pages; i++) {
++//         rb->data_pages[i] = (void *)__get_free_pages(GFP_KERNEL, 0);
++//         if (!rb->data_pages[i])
++//             goto free_data_pages;
++//     }
++
++//     return rb;
++
++// free_data_pages:
++//     for (int i = 0; i < nr_pages; i++) {
++//         if (rb->data_pages[i])
++//             free_pages((unsigned long)rb->data_pages[i], 0);
++//     }
++//     kfree(rb->data_pages);
++// free_user_page:
++//     free_pages((unsigned long)rb->user_page, 0);
++// error:
++//     kfree(rb);
++//     return NULL;
++// }
++
++// static void ring_buffer_attach(struct perf_event *event, struct perf_buffer *rb)
++// {
++//     struct perf_buffer *old_rb = NULL;
++//     unsigned long flags;
++
++//     if (event->rb) {
++//         old_rb = event->rb;
++//         spin_lock_irqsave(&old_rb->event_lock, flags);
++//         list_del_rcu(&event->rb_entry);
++//         spin_unlock_irqrestore(&old_rb->event_lock, flags);
++//     }
++
++//     if (rb) {
++//         spin_lock_irqsave(&rb->event_lock, flags);
++//         list_add_rcu(&event->rb_entry, &rb->event_list);
++//         spin_unlock_irqrestore(&rb->event_lock, flags);
++//     }
++
++//     rcu_assign_pointer(event->rb, rb);
++
++//     if (old_rb) {
++//         synchronize_rcu();  // RCU 동기화 추가
++//         if (refcount_dec_and_test(&old_rb->refcount))
++//             kfree(old_rb);
++//     }
++// }
++
++// static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, __u32 pid)
++// {
++//     struct perf_event_attr attr;
++//     struct perf_event *event;
++//     struct perf_buffer *rb;
++
++//     printk(KERN_INFO "[__perf_event_open] Creating PEBS event for CPU %llu, event %llu\n", cpu, type);
++//     memset(&attr, 0, sizeof(struct perf_event_attr));
++
++//     attr.type = PERF_TYPE_RAW;
++//     attr.size = sizeof(struct perf_event_attr);
++//     attr.config = config;
++// 	attr.sample_period = SAMPLE_PERIOD;
++//     attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR;
++//     attr.disabled = 0;
++//     attr.exclude_kernel = 1;
++//     attr.exclude_hv = 1;
++//     attr.exclude_callchain_kernel = 1;
++//     attr.exclude_callchain_user = 1;
++//     attr.precise_ip = 1;
++//     attr.enable_on_exec = 1;
++
++//     printk(KERN_INFO "[__perf_event_open] PEBS attributed done for CPU %llu, event %llu\n", cpu, type);
++
++//     event = perf_event_create_kernel_counter(&attr, cpu, NULL, 
++//                                            perf_sample_callback, NULL);
++//     if (IS_ERR(event)) {
++//         printk(KERN_ERR "[__perf_event_open] PEBS init failed for CPU%llu/Event%llu\n", cpu, type);
++//         return PTR_ERR(event);
++//     }
++
++//     printk(KERN_INFO "[__perf_event_open] PEBS event created for CPU %llu, event %llu\n", cpu, type);
++
++//     // Ring buffer allocation and attachment
++//     rb = perf_buffer_alloc(8);  // 8 pages, no overwrite
++//     printk(KERN_INFO "[__perf_event_open] PEBS ring buffer allocated for CPU %llu, event %llu\n", cpu, type);
++//     if (!rb) {
++//         perf_event_release_kernel(event);
++//         return -ENOMEM;
++//     }
++
++//     ring_buffer_attach(event, rb);
++//     printk(KERN_INFO "[__perf_event_open] PEBS ring buffer attached for CPU %llu, event %llu\n", cpu, type);
++//     mem_event[cpu][type] = event;
++    
++//     return 0;
++// }
++
++static int __perf_event_open(__u64 config, __u64 cpu,
++	__u64 type, __u32 pid)
++{
++    struct perf_event_attr attr;
++    struct file *file;
++    int event_fd, __pid;
++
++    memset(&attr, 0, sizeof(struct perf_event_attr));
++
++    attr.type = PERF_TYPE_RAW;
++    attr.size = sizeof(struct perf_event_attr);
++    attr.config = config;
++	attr.sample_period = SAMPLE_PERIOD;
++    attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR;
++    attr.disabled = 0;
++    attr.exclude_kernel = 1;
++    attr.exclude_hv = 1;
++    attr.exclude_callchain_kernel = 1;
++    attr.exclude_callchain_user = 1;
++    attr.precise_ip = 1;
++    attr.enable_on_exec = 1;
++
++    if (pid == 0)
++	__pid = -1;
++    else
++	__pid = pid;
++	
++    event_fd = test__perf_event_open(&attr, __pid, cpu, -1, 0);
++    //event_fd = htmm__perf_event_open(&attr, -1, cpu, -1, 0);
++    if (event_fd <= 0) {
++	printk("[error test__perf_event_open failure] event_fd: %d\n", event_fd);
++	return -1;
++    }
++
++    file = fget(event_fd);
++    if (!file) {
++	printk("invalid file\n");
++	return -1;
++    }
++    mem_event[cpu][type] = fget(event_fd)->private_data;
++    return 0;
++}
++
++static int pebs_init(void)
++{
++    int cpu, event;
++
++    printk(KERN_INFO "[pebs_init] start\n");
++
++    mem_event = kzalloc(sizeof(struct perf_event **) * CPUS_PER_SOCKET, GFP_KERNEL);
++    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
++	mem_event[cpu] = kzalloc(sizeof(struct perf_event *) * N_HTMMEVENTS, GFP_KERNEL);
++    }
++
++    printk(KERN_INFO "[pebs_init] mem_event initialized \n");
++
++    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {        
++    for (event = 0; event < N_HTMMEVENTS; event++) {
++        if (get_pebs_event(event) == N_HTMMEVENTS) {
++        mem_event[cpu][event] = NULL;
++        continue;
++        }
++        
++        printk(KERN_INFO "Creating PEBS event for CPU %d, event %d\n", cpu, event);
++        if (__perf_event_open(get_pebs_event(event), cpu, event, -1)) return -1;
++        if (test__perf_event_init(mem_event[cpu][event], BUFFER_SIZE)) return -1;
++        printk(KERN_INFO "PEBS event created for event %d\n", event);
++    }
++    }
++    return 0;
++}
++
++static void pebs_cleanup(void)
++{
++    int cpu, event;
++    
++    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
++        for (event = 0; event < N_HTMMEVENTS; event++) {
++            if (mem_event[cpu][event])
++                perf_event_disable(mem_event[cpu][event]);
++        }
++        kfree(mem_event[cpu]);
++    }
++}
++
++static int ksamplingd(void *data)
++{
++    printk(KERN_INFO "[ksamplingd] Sampling thread started\n");
++    while (!kthread_should_stop()) {
++        int cpu, event, cond = false;
++        
++        for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
++            for (event = 0; event < N_HTMMEVENTS; event++) {
++                do {
++                    struct perf_buffer *rb;
++                    struct perf_event_mmap_page *up;
++                    struct perf_event_header *ph;
++                    struct test_event *te;
++                    unsigned long pg_index, offset;
++                    int page_shift;
++                    __u64 head;
++
++                    if (!mem_event[cpu][event]) {
++                        printk(KERN_INFO "[ksamplingd] No event for CPU %d, event %d\n", cpu, event);
++                        break;
++                    }
++
++                    __sync_synchronize();
++
++                    rb = mem_event[cpu][event]->rb;
++                    if (!rb) {
++                        printk(KERN_INFO "[ksamplingd] Ring buffer is NULL for CPU %d, event %d\n", cpu, event);
++                        return -1;
++                    }
++
++                    up = READ_ONCE(rb->user_page);
++                    head = READ_ONCE(up->data_head);
++                    if (head == up->data_tail) {
++                        printk(KERN_INFO "[ksamplingd] No new data for CPU %d, event %d\n", cpu, event);
++                        break;
++                    }
++
++                    head -= up->data_tail;
++                    if (head > (BUFFER_SIZE * 50 / 100)) {
++                        printk(KERN_INFO "[ksamplingd] Buffer more than 50%% full (size: %llu)\n", head);
++                        cond = true;
++                    } else if (head < (BUFFER_SIZE * 10 / 100)) {
++                        cond = false;
++                    }
++
++                    smp_rmb();
++
++                    page_shift = PAGE_SHIFT + page_order(rb);
++                    offset = READ_ONCE(up->data_tail);
++                    pg_index = (offset >> page_shift) & (rb->nr_pages - 1);
++                    offset &= (1 << page_shift) - 1;
++
++                    ph = (void*)(rb->data_pages[pg_index] + offset);
++                    switch (ph->type) {
++                    case PERF_RECORD_SAMPLE:
++                        te = (struct test_event *)ph;
++                        if (!valid_va(te->addr)) {
++                            printk(KERN_INFO "[ksamplingd] Invalid virtual address detected\n");
++                            break;
++                        }
++
++                        printk(KERN_INFO "[ksamplingd] PEBS sample: ip=0x%llx, tgid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
++                            te->ip, te->pid, te->tid, te->addr, te->phys_addr);
++                        break;
++                    case PERF_RECORD_THROTTLE:
++                    case PERF_RECORD_UNTHROTTLE:
++                        printk(KERN_INFO "[ksamplingd] Throttle event detected\n");
++                        break;
++                    case PERF_RECORD_LOST_SAMPLES:
++                        printk(KERN_INFO "[ksamplingd] Lost samples event detected\n");
++                        break;
++                    default:
++                        printk(KERN_INFO "[ksamplingd] Unknown event type: %d\n", ph->type);
++                        break;
++                    }
++                    smp_mb();
++                    WRITE_ONCE(up->data_tail, up->data_tail + ph->size);
++                } while (cond);
++            }
++        }
++        msleep_interruptible(100);
++    }
++    printk(KERN_INFO "[ksamplingd] Sampling thread stopped\n");
++    return 0;
++}
++
++int pebs_test_init(void)
++{
++    printk(KERN_INFO "HTMM PEBS module loading\n");
++    int ret;
++    if ((ret = pebs_init()) != 0)
++        return ret;
++
++    printk(KERN_INFO "PEBS initialized\n");
++
++    access_sampling = kthread_run(ksamplingd, NULL, "pebs_sampling");
++    if (IS_ERR(access_sampling)) {
++        pebs_cleanup();
++        return PTR_ERR(access_sampling);
++    }
++    
++    printk(KERN_INFO "HTMM PEBS module loaded\n");
++    return 0;
++}
++
++void pebs_test_exit(void)
++{
++    kthread_stop(access_sampling);
++    pebs_cleanup();
++    printk(KERN_INFO "HTMM PEBS module unloaded\n");
++}
++
++// module_init(pebs_test_init);
++// module_exit(pebs_test_exit);
+diff --git a/pebs_userspace/Makefile b/pebs_userspace/Makefile
+new file mode 100644
+index 000000000..4e407d30e
+--- /dev/null
++++ b/pebs_userspace/Makefile
+@@ -0,0 +1,29 @@
++# Compiler
++CC = gcc
++
++# Compiler flags
++CFLAGS = -Wall -O2
++
++# Target executable
++TARGET = pebs_userspace
++
++# Source files
++SRCS = main.c pebs.c
++
++# Object files
++OBJS = $(SRCS:.c=.o)
++
++# Default target
++all: $(TARGET)
++
++# Link the target executable
++$(TARGET): $(OBJS)
++	$(CC) $(CFLAGS) -o $@ $^
++
++# Compile source files into object files
++%.o: %.c
++	$(CC) $(CFLAGS) -c $< -o $@
++
++# Clean up build artifacts
++clean:
++	rm -f $(TARGET) $(OBJS)
+diff --git a/pebs_userspace/pebs_userspace.c b/pebs_userspace/pebs_userspace.c
+new file mode 100644
+index 000000000..a5d7abe98
+--- /dev/null
++++ b/pebs_userspace/pebs_userspace.c
+@@ -0,0 +1,35 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <err.h>
++#include <sys/wait.h>
++
++int syscall_pebs_start = 463;
++int syscall_pebs_end = 464;
++
++
++
++long pebs_start(pid_t pid)
++{
++    return syscall(syscall_pebs_start, pid);
++}
++
++long pebs_end(pid_t pid)
++{
++    return syscall(syscall_pebs_end, pid);
++}
++
++
++int main (int argc, char *argv[])
++{
++    pid_t pid = fork();
++
++    // if argument is start, call pebs_start
++    if (argc == 2 && strcmp(argv[1], "start") == 0) {
++        pebs_start(pid);
++    }
++    // if argument is end, call pebs_end
++    else if (argc == 2 && strcmp(argv[1], "end") == 0) {
++        pebs_end(pid);
++    }
++}
+\ No newline at end of file
