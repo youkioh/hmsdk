@@ -48,8 +48,6 @@ set booting kernel to
 sudo grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-pebs_git"
 ```
 
-### For Test
-hello!
 
 ## License
 
