@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <err.h>
 #include <sys/wait.h>
+#include <string.h>
 
 int syscall_pebs_start = 463;
 int syscall_pebs_end = 464;
@@ -26,10 +27,12 @@ int main (int argc, char *argv[])
 
     // if argument is start, call pebs_start
     if (argc == 2 && strcmp(argv[1], "start") == 0) {
+        printf("pebs start\n");
         pebs_start(pid);
     }
     // if argument is end, call pebs_end
     else if (argc == 2 && strcmp(argv[1], "end") == 0) {
+        printf("pebs end\n");
         pebs_end(pid);
     }
 }

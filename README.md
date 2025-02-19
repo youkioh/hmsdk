@@ -48,6 +48,9 @@ set booting kernel to
 sudo grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-pebs_git"
 ```
 
+### For Test
+hello!
+
 ## License
 
 The HMSDK is released under BSD 2-Clause license.
