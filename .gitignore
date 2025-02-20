@@ -5,4 +5,4 @@ __pycache__
 *.o
 *.ko
 /arch/x86/boot/
-make.log
+*.log

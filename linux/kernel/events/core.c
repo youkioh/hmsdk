@@ -12653,15 +12653,39 @@ perf_check_permission(struct perf_event_attr *attr, struct task_struct *task)
 
 #ifdef CONFIG_PEBS_TEST
 
-SYSCALL_DEFINE1(pebs_start,
-		pid_t, pid)
-{
-    pebs_test_init();
-    return 0;
+SYSCALL_DEFINE2(pebs_start,
+		pid_t, pid, char __user *, buf)
+{ 
+	char* cgroup_path;
+	int ret;
+
+	// NULL check for buf
+	if (!buf)
+		return -EINVAL;
+
+	// Allocate kernel memory
+	cgroup_path = kmalloc(256, GFP_KERNEL);
+	if (!cgroup_path)
+		return -ENOMEM;
+
+	// Copy from userspace with error checking
+	ret = copy_from_user(cgroup_path, buf, 256);
+	if (ret) {
+		kfree(cgroup_path);
+		return -EFAULT;
+	}
+
+	// Call pebs_test_init
+	ret = pebs_test_init(pid, cgroup_path); 
+	
+	// Free allocated memory
+	kfree(cgroup_path);
+
+	return ret;
 }
 
-SYSCALL_DEFINE1(pebs_end,
-		pid_t, pid)
+SYSCALL_DEFINE2(pebs_end,
+		pid_t, pid, char __user *, cgroup_path)
 {
     pebs_test_exit();
     return 0;
@@ -12726,6 +12750,7 @@ int test__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	int f_flags = O_RDWR;
 	int cgroup_fd = -1;
 
+	printk("test__perf_event_open pid: %d", pid);
 	/* for future expandability... */
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;

@@ -2,7 +2,7 @@
 VERSION = 6
 PATCHLEVEL = 12
 SUBLEVEL = 0
-EXTRAVERSION = -pebs_git
+EXTRAVERSION = -pebs_enabled+
 NAME = Baby Opossum Posse
 
 # *DOCUMENTATION*

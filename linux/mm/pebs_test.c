@@ -6,13 +6,19 @@
 #include <linux/cpumask.h>
 #include <linux/delay.h>
 #include <linux/sched/cputime.h>
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/cgroup.h>
 
 #include "../kernel/events/internal.h"
 
 #include <linux/pebs_test.h>
 
 #define CPUS_PER_SOCKET 4
-#define BUFFER_SIZE	32 /* 128: 1MB */
+#define BUFFER_SIZE	4096 /* 128: 1MB */
 #define SAMPLE_PERIOD 1000
 
 /* pebs events */
@@ -31,6 +37,7 @@ MODULE_DESCRIPTION("PEBS Sampling Module");
 
 static struct task_struct *access_sampling;
 static struct perf_event ***mem_event;
+static struct VMAArray *vma_array_ptr;
 
 static bool valid_va(unsigned long addr)
 {
@@ -63,153 +70,12 @@ static __u64 get_pebs_event(enum events e)
     }
 }
 
-
-// static void perf_sample_callback(struct perf_event *event,
-//                                struct perf_sample_data *data,
-//                                struct pt_regs *regs)
-// {
-//     char *event_name;
-
-//     switch (event->attr.config) {
-//         case LLC_LOAD_MISS:
-//             event_name = "LLC_LOAD_MISS";
-//             break;
-//         default:
-//             event_name = "UNKNOWN";
-//     }
-
-//     pr_info("[PEBS] event: %s, ip=0x%lx, tgid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
-//             event_name, regs->ip,
-//             data->tid_entry.pid,
-//             data->tid_entry.tid,
-//             data->addr, data->phys_addr);
-// }
-
-// static struct perf_buffer *perf_buffer_alloc(int nr_pages)
-// {
-//     struct perf_buffer *rb;
-
-//     rb = kzalloc(sizeof(*rb), GFP_KERNEL);
-//     if (!rb)
-//         return NULL;
-
-//     rb->nr_pages = nr_pages;
-
-//     refcount_set(&rb->refcount, 1);
-//     INIT_LIST_HEAD(&rb->event_list);
-//     spin_lock_init(&rb->event_lock);
-
-//     // 사용자 페이지와 데이터 페이지 할당
-//     rb->user_page = (void *)__get_free_pages(GFP_KERNEL, 0);
-//     if (!rb->user_page)
-//         goto error;
-
-//     rb->data_pages = kcalloc(nr_pages, sizeof(void *), GFP_KERNEL);
-//     if (!rb->data_pages) 
-//         goto free_user_page;
-
-//     for (int i = 0; i < nr_pages; i++) {
-//         rb->data_pages[i] = (void *)__get_free_pages(GFP_KERNEL, 0);
-//         if (!rb->data_pages[i])
-//             goto free_data_pages;
-//     }
-
-//     return rb;
-
-// free_data_pages:
-//     for (int i = 0; i < nr_pages; i++) {
-//         if (rb->data_pages[i])
-//             free_pages((unsigned long)rb->data_pages[i], 0);
-//     }
-//     kfree(rb->data_pages);
-// free_user_page:
-//     free_pages((unsigned long)rb->user_page, 0);
-// error:
-//     kfree(rb);
-//     return NULL;
-// }
-
-// static void ring_buffer_attach(struct perf_event *event, struct perf_buffer *rb)
-// {
-//     struct perf_buffer *old_rb = NULL;
-//     unsigned long flags;
-
-//     if (event->rb) {
-//         old_rb = event->rb;
-//         spin_lock_irqsave(&old_rb->event_lock, flags);
-//         list_del_rcu(&event->rb_entry);
-//         spin_unlock_irqrestore(&old_rb->event_lock, flags);
-//     }
-
-//     if (rb) {
-//         spin_lock_irqsave(&rb->event_lock, flags);
-//         list_add_rcu(&event->rb_entry, &rb->event_list);
-//         spin_unlock_irqrestore(&rb->event_lock, flags);
-//     }
-
-//     rcu_assign_pointer(event->rb, rb);
-
-//     if (old_rb) {
-//         synchronize_rcu();  // RCU 동기화 추가
-//         if (refcount_dec_and_test(&old_rb->refcount))
-//             kfree(old_rb);
-//     }
-// }
-
-// static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, __u32 pid)
-// {
-//     struct perf_event_attr attr;
-//     struct perf_event *event;
-//     struct perf_buffer *rb;
-
-//     printk(KERN_INFO "[__perf_event_open] Creating PEBS event for CPU %llu, event %llu\n", cpu, type);
-//     memset(&attr, 0, sizeof(struct perf_event_attr));
-
-//     attr.type = PERF_TYPE_RAW;
-//     attr.size = sizeof(struct perf_event_attr);
-//     attr.config = config;
-// 	attr.sample_period = SAMPLE_PERIOD;
-//     attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR;
-//     attr.disabled = 0;
-//     attr.exclude_kernel = 1;
-//     attr.exclude_hv = 1;
-//     attr.exclude_callchain_kernel = 1;
-//     attr.exclude_callchain_user = 1;
-//     attr.precise_ip = 1;
-//     attr.enable_on_exec = 1;
-
-//     printk(KERN_INFO "[__perf_event_open] PEBS attributed done for CPU %llu, event %llu\n", cpu, type);
-
-//     event = perf_event_create_kernel_counter(&attr, cpu, NULL, 
-//                                            perf_sample_callback, NULL);
-//     if (IS_ERR(event)) {
-//         printk(KERN_ERR "[__perf_event_open] PEBS init failed for CPU%llu/Event%llu\n", cpu, type);
-//         return PTR_ERR(event);
-//     }
-
-//     printk(KERN_INFO "[__perf_event_open] PEBS event created for CPU %llu, event %llu\n", cpu, type);
-
-//     // Ring buffer allocation and attachment
-//     rb = perf_buffer_alloc(8);  // 8 pages, no overwrite
-//     printk(KERN_INFO "[__perf_event_open] PEBS ring buffer allocated for CPU %llu, event %llu\n", cpu, type);
-//     if (!rb) {
-//         perf_event_release_kernel(event);
-//         return -ENOMEM;
-//     }
-
-//     ring_buffer_attach(event, rb);
-//     printk(KERN_INFO "[__perf_event_open] PEBS ring buffer attached for CPU %llu, event %llu\n", cpu, type);
-//     mem_event[cpu][type] = event;
-    
-//     return 0;
-// }
-
-static int __perf_event_open(__u64 config, __u64 cpu,
-	__u64 type, __u32 pid)
+static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, pid_t pid, int cgroup_fd)
 {
     struct perf_event_attr attr;
     struct file *file;
-    int event_fd, __pid;
+    int event_fd;
+    // pid_t __pid;
 
     memset(&attr, 0, sizeof(struct perf_event_attr));
 
@@ -223,19 +89,23 @@ static int __perf_event_open(__u64 config, __u64 cpu,
     attr.exclude_hv = 1;
     attr.exclude_callchain_kernel = 1;
     attr.exclude_callchain_user = 1;
-    attr.precise_ip = 1;
+    attr.precise_ip = 2;
     attr.enable_on_exec = 1;
+    attr.inherit = 1; // for child process/thread
 
-    if (pid == 0)
-	__pid = -1;
-    else
-	__pid = pid;
+    // if (pid == 0)
+	// __pid = -1;
+    // else
+	// __pid = pid;
+
+    printk("[__perf_event_open] pid: %d, cpu: %lld, type: %lld\n", pid, cpu, type);
 	
-    event_fd = test__perf_event_open(&attr, __pid, cpu, -1, 0);
-    //event_fd = htmm__perf_event_open(&attr, -1, cpu, -1, 0);
+    event_fd = test__perf_event_open(&attr, cgroup_fd, cpu, -1, PERF_FLAG_PID_CGROUP);
+    // event_fd = test__perf_event_open(&attr, pid, cpu, -1, 0);
+    // event_fd = test__perf_event_open(&attr, -1, cpu, -1, 0);
     if (event_fd <= 0) {
-	printk("[error test__perf_event_open failure] event_fd: %d\n", event_fd);
-	return -1;
+        printk("[error test__perf_event_open failure] event_fd: %d\n", event_fd);
+        return -1;
     }
 
     file = fget(event_fd);
@@ -247,7 +117,7 @@ static int __perf_event_open(__u64 config, __u64 cpu,
     return 0;
 }
 
-static int pebs_init(void)
+static int pebs_init(pid_t pid, int cgroup_fd)
 {
     int cpu, event;
 
@@ -268,7 +138,7 @@ static int pebs_init(void)
         }
         
         printk(KERN_INFO "Creating PEBS event for CPU %d, event %d\n", cpu, event);
-        if (__perf_event_open(get_pebs_event(event), cpu, event, -1)) return -1;
+        if (__perf_event_open(get_pebs_event(event), cpu, event, pid, cgroup_fd)) return -1;
         if (test__perf_event_init(mem_event[cpu][event], BUFFER_SIZE)) return -1;
         printk(KERN_INFO "PEBS event created for event %d\n", event);
     }
@@ -279,13 +149,19 @@ static int pebs_init(void)
 static void pebs_cleanup(void)
 {
     int cpu, event;
-    
+    printk(KERN_INFO "pebs_cleanup called\n");
     for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
         for (event = 0; event < N_HTMMEVENTS; event++) {
-            if (mem_event[cpu][event])
+            if (mem_event[cpu][event]) {
+                if (!mem_event[cpu][event]) {
+                    printk(KERN_INFO "No PEBS event for CPU %d, event %d\n", cpu, event);
+                    return;
+                }
+                printk(KERN_INFO "Disabling PEBS event for CPU %d, event %d\n", cpu, event);
                 perf_event_disable(mem_event[cpu][event]);
+            }
         }
-        kfree(mem_event[cpu]);
+        // kfree(mem_event[cpu]);
     }
 }
 
@@ -307,7 +183,7 @@ static int ksamplingd(void *data)
                     __u64 head;
 
                     if (!mem_event[cpu][event]) {
-                        printk(KERN_INFO "[ksamplingd] No event for CPU %d, event %d\n", cpu, event);
+                        // printk(KERN_INFO "[ksamplingd] No event for CPU %d, event %d\n", cpu, event);
                         break;
                     }
 
@@ -315,22 +191,24 @@ static int ksamplingd(void *data)
 
                     rb = mem_event[cpu][event]->rb;
                     if (!rb) {
-                        printk(KERN_INFO "[ksamplingd] Ring buffer is NULL for CPU %d, event %d\n", cpu, event);
+                        // printk(KERN_INFO "[ksamplingd] Ring buffer is NULL for CPU %d, event %d\n", cpu, event);
                         return -1;
                     }
 
                     up = READ_ONCE(rb->user_page);
                     head = READ_ONCE(up->data_head);
                     if (head == up->data_tail) {
-                        printk(KERN_INFO "[ksamplingd] No new data for CPU %d, event %d\n", cpu, event);
+                        // printk(KERN_INFO "[ksamplingd] No new data for CPU %d, event %d\n", cpu, event);
                         break;
                     }
 
                     head -= up->data_tail;
                     if (head > (BUFFER_SIZE * 50 / 100)) {
-                        printk(KERN_INFO "[ksamplingd] Buffer more than 50%% full (size: %llu)\n", head);
+                        // printk(KERN_INFO "[ksamplingd] Buffer more than 50%% full (size: %llu)\n", head);
                         cond = true;
                     } else if (head < (BUFFER_SIZE * 10 / 100)) {
+                        // printk(KERN_INFO "[ksamplingd] Buffer less than 10%% full (size: %llu)\n", head);
+                        // printk(KERN_INFO "[ksamplingd] cond to false\n");
                         cond = false;
                     }
 
@@ -346,22 +224,23 @@ static int ksamplingd(void *data)
                     case PERF_RECORD_SAMPLE:
                         te = (struct test_event *)ph;
                         if (!valid_va(te->addr)) {
-                            printk(KERN_INFO "[ksamplingd] Invalid virtual address detected\n");
+                            // printk(KERN_INFO "[ksamplingd] Invalid virtual address detected\n");
                             break;
                         }
 
-                        printk(KERN_INFO "[ksamplingd] PEBS sample: ip=0x%llx, tgid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
-                            te->ip, te->pid, te->tid, te->addr, te->phys_addr);
+                        // printk(KERN_INFO "[ksamplingd] PEBS sample: ip=0x%llx, pid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
+                        //     te->ip, te->pid, te->tid, te->addr, te->phys_addr);
+                        access_address(vma_array_ptr, te->addr);
                         break;
                     case PERF_RECORD_THROTTLE:
                     case PERF_RECORD_UNTHROTTLE:
-                        printk(KERN_INFO "[ksamplingd] Throttle event detected\n");
+                        // printk(KERN_INFO "[ksamplingd] Throttle event detected\n");
                         break;
                     case PERF_RECORD_LOST_SAMPLES:
-                        printk(KERN_INFO "[ksamplingd] Lost samples event detected\n");
+                        // printk(KERN_INFO "[ksamplingd] Lost samples event detected\n");
                         break;
                     default:
-                        printk(KERN_INFO "[ksamplingd] Unknown event type: %d\n", ph->type);
+                        // printk(KERN_INFO "[ksamplingd] Unknown event type: %d\n", ph->type);
                         break;
                     }
                     smp_mb();
@@ -375,30 +254,71 @@ static int ksamplingd(void *data)
     return 0;
 }
 
-int pebs_test_init(void)
+int pebs_test_init(pid_t pid, char* cgroup_path)
 {
-    printk(KERN_INFO "HTMM PEBS module loading\n");
+    printk(KERN_INFO "PEBS test initializing\n");
     int ret;
-    if ((ret = pebs_init()) != 0)
+    // print_all_vma(pid);
+    vma_array_ptr = vma_array_init(pid);
+    printk(KERN_INFO "VMA array initialized\n");
+    
+    //for monitoring cgroup
+    struct file *cgroup_file = filp_open(cgroup_path, O_RDONLY, 0);
+    if (IS_ERR(cgroup_file)) {
+        printk("[error open failure]\n");
+        return -1;
+    }
+    int cgroup_fd = get_unused_fd_flags(0);
+    if (cgroup_fd < 0) {
+        printk(KERN_ERR "Error get_unused_fd_flags\n");
+        return -1;
+    }
+    fd_install(cgroup_fd, cgroup_file);
+    printk(KERN_INFO "cgroup_fd: %d\n", cgroup_fd);
+    
+    //pebs_init
+    if ((ret = pebs_init(pid, cgroup_fd)) != 0)
         return ret;
 
-    printk(KERN_INFO "PEBS initialized\n");
-
+    if (access_sampling) {
+        printk(KERN_INFO "Sampling thread already exists\n");
+        return -1;
+    }
+    //run sampling thread
     access_sampling = kthread_run(ksamplingd, NULL, "pebs_sampling");
     if (IS_ERR(access_sampling)) {
         pebs_cleanup();
         return PTR_ERR(access_sampling);
     }
     
-    printk(KERN_INFO "HTMM PEBS module loaded\n");
+    printk(KERN_INFO "PEBS test initialized\n");
     return 0;
 }
 
 void pebs_test_exit(void)
 {
+    if (!access_sampling) {
+        printk(KERN_INFO "Sampling thread does not exist\n");
+        return;
+    }
+    printk(KERN_INFO "Sampling thread stopping...\n");
     kthread_stop(access_sampling);
+    printk(KERN_INFO "Sampling thread stopped\n");
+    
+    if (!vma_array_ptr) {
+        printk(KERN_INFO "VMA array does not exist\n");
+        return;
+    }
+    printk(KERN_INFO "VMA array statistics\n");
+    vma_array_stat(vma_array_ptr);
+
+    printk(KERN_INFO "Call free_vma_array\n");
+    free_vma_array(vma_array_ptr);
+
+    printk(KERN_INFO "Call pebs_cleanup\n");
     pebs_cleanup();
-    printk(KERN_INFO "HTMM PEBS module unloaded\n");
+
+    printk(KERN_INFO "pebs_cleanup done.\n");
 }
 
 // module_init(pebs_test_init);
