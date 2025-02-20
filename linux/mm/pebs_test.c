@@ -17,7 +17,7 @@
 
 #include <linux/pebs_test.h>
 
-#define CPUS_PER_SOCKET 4
+#define CPUS_PER_SOCKET 64
 #define BUFFER_SIZE	4096 /* 128: 1MB */
 #define SAMPLE_PERIOD 1000
 
@@ -57,7 +57,8 @@ struct test_event {
 
 enum events {
     LLC_LOAD = 0,
-    N_HTMMEVENTS
+    ALL_STORE = 1,
+    N_PEBSEVENTS
 };
 
 static __u64 get_pebs_event(enum events e)
@@ -65,8 +66,10 @@ static __u64 get_pebs_event(enum events e)
     switch (e) {
     case LLC_LOAD:
         return LLC_LOAD_MISS;
+    case ALL_STORE:
+        return ALL_STORES;
 	default:
-	    return N_HTMMEVENTS;
+	    return N_PEBSEVENTS;
     }
 }
 
@@ -75,7 +78,6 @@ static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, pid_t pid, int
     struct perf_event_attr attr;
     struct file *file;
     int event_fd;
-    // pid_t __pid;
 
     memset(&attr, 0, sizeof(struct perf_event_attr));
 
@@ -91,12 +93,7 @@ static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, pid_t pid, int
     attr.exclude_callchain_user = 1;
     attr.precise_ip = 2;
     attr.enable_on_exec = 1;
-    attr.inherit = 1; // for child process/thread
-
-    // if (pid == 0)
-	// __pid = -1;
-    // else
-	// __pid = pid;
+    attr.inherit = 1;
 
     printk("[__perf_event_open] pid: %d, cpu: %lld, type: %lld\n", pid, cpu, type);
 	
@@ -125,23 +122,28 @@ static int pebs_init(pid_t pid, int cgroup_fd)
 
     mem_event = kzalloc(sizeof(struct perf_event **) * CPUS_PER_SOCKET, GFP_KERNEL);
     for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
-	mem_event[cpu] = kzalloc(sizeof(struct perf_event *) * N_HTMMEVENTS, GFP_KERNEL);
+	mem_event[cpu] = kzalloc(sizeof(struct perf_event *) * N_PEBSEVENTS, GFP_KERNEL);
     }
 
     printk(KERN_INFO "[pebs_init] mem_event initialized \n");
 
-    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {        
-    for (event = 0; event < N_HTMMEVENTS; event++) {
-        if (get_pebs_event(event) == N_HTMMEVENTS) {
-        mem_event[cpu][event] = NULL;
-        continue;
+    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {       
+        // to disable PEBS of node 1 cpus
+        if ((cpu >= 16 && cpu < 32) || (cpu >= 48 && cpu < 64)) {
+            printk(KERN_INFO "Disable PEBS of node 1 CPU: %d\n", cpu);
+            continue;
         }
-        
-        printk(KERN_INFO "Creating PEBS event for CPU %d, event %d\n", cpu, event);
-        if (__perf_event_open(get_pebs_event(event), cpu, event, pid, cgroup_fd)) return -1;
-        if (test__perf_event_init(mem_event[cpu][event], BUFFER_SIZE)) return -1;
-        printk(KERN_INFO "PEBS event created for event %d\n", event);
-    }
+        for (event = 0; event < N_PEBSEVENTS; event++) {
+            if (get_pebs_event(event) == N_PEBSEVENTS) {
+            mem_event[cpu][event] = NULL;
+            continue;
+            }
+            
+            printk(KERN_INFO "Creating PEBS event for CPU %d, event %d\n", cpu, event);
+            if (__perf_event_open(get_pebs_event(event), cpu, event, pid, cgroup_fd)) return -1;
+            if (test__perf_event_init(mem_event[cpu][event], BUFFER_SIZE)) return -1;
+            printk(KERN_INFO "PEBS event created for event %d\n", event);
+        }
     }
     return 0;
 }
@@ -151,7 +153,7 @@ static void pebs_cleanup(void)
     int cpu, event;
     printk(KERN_INFO "pebs_cleanup called\n");
     for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
-        for (event = 0; event < N_HTMMEVENTS; event++) {
+        for (event = 0; event < N_PEBSEVENTS; event++) {
             if (mem_event[cpu][event]) {
                 if (!mem_event[cpu][event]) {
                     printk(KERN_INFO "No PEBS event for CPU %d, event %d\n", cpu, event);
@@ -172,7 +174,7 @@ static int ksamplingd(void *data)
         int cpu, event, cond = false;
         
         for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
-            for (event = 0; event < N_HTMMEVENTS; event++) {
+            for (event = 0; event < N_PEBSEVENTS; event++) {
                 do {
                     struct perf_buffer *rb;
                     struct perf_event_mmap_page *up;
@@ -320,6 +322,3 @@ void pebs_test_exit(void)
 
     printk(KERN_INFO "pebs_cleanup done.\n");
 }
-
-// module_init(pebs_test_init);
-// module_exit(pebs_test_exit);
